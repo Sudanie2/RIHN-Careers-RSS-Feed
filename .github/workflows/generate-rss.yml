@@ -1,0 +1,137 @@
+name: Generate RIHN Careers RSS Feed
+on:
+  schedule:
+    - cron: "0 22 * * *"  # JST 07:00（毎日1回。変更可）
+  workflow_dispatch: # 手動実行も可能
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+      - name: Fetch previous RSS file
+        run: |
+          if [ -f rss.xml ]; then
+            cp rss.xml previous_rss.xml
+          else
+            touch previous_rss.xml
+          fi
+      - name: Fetch and parse careers page
+        run: |
+          cat << 'EOF' > generate_rss.py
+          import html
+          import requests
+          from bs4 import BeautifulSoup
+          from datetime import datetime, timezone, timedelta
+
+          URL = "https://www.chikyu.ac.jp/rihn/careers/"
+          BASE = "https://www.chikyu.ac.jp"
+          JST = timezone(timedelta(hours=9))
+          TARGET_CATEGORY = "公募"
+
+          headers = {"User-Agent": "Mozilla/5.0 (compatible; RIHN-RSS-Bot/1.0; +https://github.com/)"}
+          res = requests.get(URL, headers=headers, timeout=30)
+          res.raise_for_status()
+          res.encoding = res.apparent_encoding
+
+          soup = BeautifulSoup(res.text, "html.parser")
+
+          all_entries = soup.select("div.bl_articleList_item")
+          print(f"全カテゴリでの抽出件数: {len(all_entries)}")  # ← 0や極端に少ない場合は要調整
+
+          items = []
+          for entry in all_entries:
+              date_span = entry.select_one("span.bl_articleList_date")
+              cat_span = entry.select_one("span.el_rectMark-cat")
+              link_tag = entry.select_one("dd a[href]")
+
+              if not (date_span and cat_span and link_tag):
+                  continue
+
+              category = cat_span.get_text(strip=True)
+              if category != TARGET_CATEGORY:
+                  continue
+
+              date_str = date_span.get_text(strip=True)
+              title = link_tag.get_text(strip=True)
+              href = link_tag["href"]
+              link = href if href.startswith("http") else BASE + href
+
+              try:
+                  pub_dt = datetime.strptime(date_str, "%Y.%m.%d").replace(
+                      hour=9, minute=0, second=0, tzinfo=JST
+                  )
+              except ValueError:
+                  continue
+
+              items.append({
+                  "title": title,
+                  "link": link,
+                  "pubDate": pub_dt.strftime("%a, %d %b %Y %H:%M:%S %z"),
+                  "guid": f"{link}|{date_str}",
+              })
+
+          print(f"「{TARGET_CATEGORY}」抽出件数: {len(items)}")  # ← ここも要確認
+
+          # guid基準で重複除去
+          seen = set()
+          unique_items = []
+          for it in items:
+              if it["guid"] in seen:
+                  continue
+              seen.add(it["guid"])
+              unique_items.append(it)
+
+          rss_items = "\n".join(
+              f'<item><title>{html.escape(it["title"])}</title>'
+              f'<link>{html.escape(it["link"])}</link>'
+              f'<pubDate>{it["pubDate"]}</pubDate>'
+              f'<guid isPermaLink="false">{html.escape(it["guid"])}</guid></item>'
+              for it in unique_items
+          )
+
+          rss = (
+              '<?xml version="1.0" encoding="UTF-8"?>\n'
+              '<rss version="2.0"><channel>\n'
+              '<title>RIHN 公募情報</title>\n'
+              f'<link>{URL}</link>\n'
+              '<description>総合地球環境学研究所 公募・調達・採用情報のうち「公募」のみ</description>\n'
+              f'{rss_items}\n'
+              '</channel></rss>'
+          )
+
+          with open("new_rss.xml", "w", encoding="utf-8") as f:
+              f.write(rss)
+          EOF
+          python generate_rss.py
+      - name: Merge new items with previous RSS
+        run: |
+          if [ ! -s new_rss.xml ]; then
+            echo "new_rss.xml が空です。パース失敗の可能性。要確認。"
+            exit 1
+          fi
+          if cmp -s new_rss.xml previous_rss.xml; then
+            echo "No changes in RSS feed. Skipping commit."
+            exit 0
+          else
+            mv new_rss.xml rss.xml
+          fi
+      - name: Commit and Push RSS
+        run: |
+          if git diff --quiet rss.xml; then
+            echo "No changes in rss.xml. Skipping commit."
+            exit 0
+          fi
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add rss.xml
+          git commit -m "Updated RIHN careers RSS feed"
+          git push
