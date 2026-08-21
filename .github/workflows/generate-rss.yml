@@ -45,7 +45,7 @@ jobs:
           soup = BeautifulSoup(res.text, "html.parser")
 
           all_entries = soup.select("div.bl_articleList_item")
-          print(f"全カテゴリでの抽出件数: {len(all_entries)}")  # ← 0や極端に少ない場合は要調整
+          print(f"全カテゴリでの抽出件数: {len(all_entries)}")
 
           items = []
           for entry in all_entries:
@@ -79,9 +79,8 @@ jobs:
                   "guid": f"{link}|{date_str}",
               })
 
-          print(f"「{TARGET_CATEGORY}」抽出件数: {len(items)}")  # ← ここも要確認
+          print(f"「{TARGET_CATEGORY}」抽出件数: {len(items)}")
 
-          # guid基準で重複除去
           seen = set()
           unique_items = []
           for it in items:
@@ -126,12 +125,12 @@ jobs:
           fi
       - name: Commit and Push RSS
         run: |
-          if git diff --quiet rss.xml; then
-            echo "No changes in rss.xml. Skipping commit."
-            exit 0
-          fi
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
           git add rss.xml
+          if git diff --cached --quiet; then
+            echo "No changes in rss.xml. Skipping commit."
+            exit 0
+          fi
           git commit -m "Updated RIHN careers RSS feed"
           git push
